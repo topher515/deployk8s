@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from functools import cache
 import json
 import os
+from pickle import GLOBAL
 import random
 import string
 import subprocess
@@ -224,7 +225,11 @@ def _is_extant_secret(secret_name) -> bool:
 def _get_helm_chart_dir(dirpath: Path):
     dirpath = dirpath / '..'
     while not (dirpath / 'Chart.yaml').is_file():
-        dirpath = (dirpath / '..')
+        parentdir = dirpath / ".."
+        if dirpath.resolve() == parentdir.resolve():
+            # We've reached the root
+            return None
+        dirpath = parentdir
     return dirpath.resolve()
 
 def _get_helm_chart_name(dirpath: Path):
@@ -237,17 +242,29 @@ def _get_helm_chart_name(dirpath: Path):
 
 @click.group()
 @click.option("--verbose", is_flag=True)
-def cli(verbose):
+@click.option("--dirpath", help="The path to the wiz env dir")
+def cli(verbose, dirpath):
     GLOBALS["verbose"] = verbose
+
+    if not dirpath:
+        cwd = os.getcwd()
+        helm_chart_dir = _get_helm_chart_dir(Path(cwd))
+        if helm_chart_dir:
+            # Has ancestor helm chart dir, so its ok to use
+            print(f"Using current dir '{cwd}' as --dirpath", file=sys.stderr)
+            dirpath = cwd
+        else:
+            raise click.exceptions.UsageError("You must specify --dirpath (or cd to the wiz env dir)")
+    
+    GLOBALS["dirpath"] = dirpath
 
 
 @cli.command("info")
-@click.argument("dirpath")
-def sync_cmd(dirpath):
+def sync_cmd():
     """
     Get info about this wiz dir env (and other context)
     """
-    dirpath = Path(dirpath)
+    dirpath = Path(GLOBALS["dirpath"])
     env = load_wiz_config(dirpath, "envName")
     namespace = load_namespace_from_config(dirpath)
     chart_name = _get_helm_chart_name(dirpath)
@@ -281,9 +298,8 @@ def release_cli():
 
 
 @release_cli.command('nuke')
-@click.argument("dirpath")
-def nuke_cmd(dirpath):
-    dirpath = Path(dirpath)
+def nuke_cmd():
+    dirpath = Path(GLOBALS["dirpath"])
     env = load_wiz_config(dirpath, "envName")
     namespace = load_namespace_from_config(dirpath)
     chart_name = _get_helm_chart_name(dirpath)
@@ -296,9 +312,8 @@ def nuke_cmd(dirpath):
 
 
 @release_cli.command('list')
-@click.argument("dirpath")
-def list_cmd(dirpath):
-    dirpath = Path(dirpath)
+def list_cmd():
+    dirpath = Path(GLOBALS["dirpath"])
     env = load_wiz_config(dirpath, "envName")
     namespace = load_namespace_from_config(dirpath)
     chart_name = _get_helm_chart_name(dirpath)
@@ -311,10 +326,9 @@ def list_cmd(dirpath):
 
 
 @release_cli.command('rollback')
-@click.argument("dirpath")
 @click.argument("revision")
-def rollback_cmd(dirpath, revision):
-    dirpath = Path(dirpath)
+def rollback_cmd(revision):
+    dirpath = Path(GLOBALS["dirpath"])
     env = load_wiz_config(dirpath, "envName")
     namespace = load_namespace_from_config(dirpath)
     chart_name = _get_helm_chart_name(dirpath)
@@ -335,9 +349,8 @@ def secret_cli():
 
 
 @secret_cli.command('list')
-@click.argument("dirpath")
-def list_cmd(dirpath):
-    namespace = load_namespace_from_config(Path(dirpath))
+def list_cmd():
+    namespace = load_namespace_from_config(Path(GLOBALS["dirpath"]))
     exec(
         'kubectl',
         'get',
@@ -347,20 +360,18 @@ def list_cmd(dirpath):
 
 
 @secret_cli.command('set')
-@click.argument("dirpath")
 @click.argument("secret_name")
 @click.argument("secret_value")
-def set_secret_cmd(dirpath, secret_name, secret_value):
-    namespace = load_namespace_from_config(Path(dirpath))
+def set_secret_cmd(secret_name, secret_value):
+    namespace = load_namespace_from_config(Path(GLOBALS["dirpath"]))
     _set_secret_cmd(namespace, secret_name, secret_value)
 
 
 @secret_cli.command('get')
 @click.option('--no-parse', is_flag=True)
-@click.argument("dirpath")
 @click.argument("secret_name")
-def get_secret_cmd(dirpath, no_parse, secret_name):
-    namespace = load_namespace_from_config(Path(dirpath))
+def get_secret_cmd(no_parse, secret_name):
+    namespace = load_namespace_from_config(Path(GLOBALS["dirpath"]))
     extras = [
         # data.value must match the GENERIC_SECRET_FIELD_NAME!
         "-o=jsonpath='{.data}'"] if no_parse else ["-o=jsonpath='{.data.value}'"]
@@ -378,10 +389,9 @@ def get_secret_cmd(dirpath, no_parse, secret_name):
 
 
 @secret_cli.command('rm')
-@click.argument("dirpath")
 @click.argument("secret_name")
-def rm_secret_cmd(dirpath, secret_name):
-    namespace = load_namespace_from_config(Path(dirpath))
+def rm_secret_cmd(secret_name):
+    namespace = load_namespace_from_config(Path(GLOBALS["dirpath"]))
     exec(
         "kubectl",
         "delete",
@@ -399,14 +409,13 @@ def envsecret_cli():
 
 
 @envsecret_cli.command('set')
-@click.argument("dirpath")
 @click.argument("envvar_name")
 @click.argument("envvar_value")
-def set_envvar_cmd(dirpath, envvar_name, envvar_value):
+def set_envvar_cmd(envvar_name, envvar_value):
     """
     Set the ENV_VAR as a secret
     """
-    dirpath = Path(dirpath)
+    dirpath = Path(GLOBALS["dirpath"])
     env = load_wiz_config(dirpath, "envName")
     namespace = load_namespace_from_config(dirpath)
     secret_name = make_envsecret_name(env, envvar_name)
@@ -423,13 +432,12 @@ def _push_envfile(namespace, env, dotenv_file):
 
 
 @envsecret_cli.command('pushfile')
-@click.argument("dirpath")
 @click.argument("dotenv_file")
-def set_envvar_cmd(dirpath, dotenv_file):
+def set_envvar_cmd(dotenv_file):
     """
     Set all the ENV_VAR values in the given files as secrets
     """
-    dirpath = Path(dirpath)
+    dirpath = Path(GLOBALS["dirpath"])
     env = load_wiz_config(dirpath, "envName")
     namespace = load_namespace_from_config(dirpath)
     return _push_envfile(namespace, env, dotenv_file)
@@ -471,14 +479,13 @@ def _set_file_as_secret(namespace, env, remote_filepath, local_filepath):
 
 
 @mntsecret_cli.command("set")
-@click.argument("dirpath")
 @click.argument("local_filepath")
 @click.argument("remote_filepath")
-def set_mntsecret(dirpath, local_filepath, remote_filepath):
+def set_mntsecret(local_filepath, remote_filepath):
     """
     Save local file as a secret
     """
-    dirpath = Path(dirpath)
+    dirpath = Path(GLOBALS["dirpath"])
     env = load_wiz_config(dirpath, "envName")
     namespace = load_namespace_from_config(dirpath)
     _set_file_as_secret(namespace, env, remote_filepath, local_filepath)
@@ -507,13 +514,12 @@ def _get_file_metas(dirpath: Path) -> Dict[str, List[MntSecretFileMeta]]:
 
 
 @wiz_cli.command("setup")
-@click.argument("dirpath")
-def wiz_setup(dirpath):
+def wiz_setup():
     """
     Do initial setup of a wiz dir env
     """
 
-    dirpath = Path(dirpath)
+    dirpath = Path(GLOBALS["dirpath"])
 
     config = load_wiz_config(dirpath)
 
@@ -555,12 +561,11 @@ def wiz_setup(dirpath):
 
 
 @wiz_cli.command("push")
-@click.argument("dirpath")
-def wiz_push(dirpath):
+def wiz_push():
     '''
     Push the secrets data derived from the wiz env dir
     '''
-    dirpath = Path(dirpath)
+    dirpath = Path(GLOBALS["dirpath"])
     env = load_wiz_config(dirpath, "envName")
     namespace = load_namespace_from_config(dirpath)
 
@@ -573,7 +578,7 @@ def wiz_push(dirpath):
         _set_files_as_secret(namespace, env, remote_dir, file_metas)
 
 
-def _wiz_genvalues(dirpath):
+def _wiz_genvalues(dirpath: str):
     '''
     Print the `values.yaml` file generated from this wiz env dir
     '''
@@ -609,26 +614,23 @@ def _wiz_genvalues(dirpath):
 
 
 @wiz_cli.command("genvalues")
-@click.argument("dirpath")
-def wiz_genvalues(dirpath):
+def wiz_genvalues():
     '''
     Print the values.yml generated from the wiz env dir
     '''
-    values = _wiz_genvalues(dirpath)
+    values = _wiz_genvalues(GLOBALS["dirpath"])
     yaml.dump(values, sys.stdout)
 
 
 @wiz_cli.command("release")
-@click.argument("dirpath")
 @click.argument("image")
-def wiz_release(dirpath, image):
+def wiz_release(image):
     '''
     Create a helm release from values.yml generated from the wiz env dir
     (and the helm chart which must be in the parent directory from the wiz env dir)
     '''
+    dirpath = Path(GLOBALS["dirpath"])
     values = _wiz_genvalues(dirpath)
-
-    dirpath = Path(dirpath)
 
     namespace = load_namespace_from_config(dirpath)
     env = load_wiz_config(dirpath, "envName")
