@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+from contextlib import contextmanager
 from functools import cache
 import json
 import os
@@ -19,6 +20,9 @@ import click.exceptions
 import yaml
 from dotenv import dotenv_values
 
+GLOBALS = {
+    "verbose": False
+}
 
 class bcolors:
     HEADER = '\033[95m'
@@ -32,12 +36,7 @@ class bcolors:
     DEMPH = '\033[1m'
     UNDERLINE = '\033[4m'
 
-
-# TODO: Change this to derrive from chart??
-APP_NAME = os.getenv('DEPLOYER_APP_PREFIX')
-
 GENERIC_SECRET_FIELD_NAME = "value"
-
 
 class MntSecretFileMeta(TypedDict):
     filename: str
@@ -48,13 +47,25 @@ VOL_MNT_WHITELIST = '-' + string.ascii_lowercase + string.digits
 
 # UTILS
 
+@contextmanager
+def swallow_prints():
+    with open(os.devnull, "w") as dev_null:
+        original = sys.stdout
+        sys.stdout = dev_null
+        yield
+        sys.stdout = original 
+
+def verbose_print(*args, **kwargs):
+    if GLOBALS["verbose"]:
+        print(*args, **kwargs)
+
 def exec(*args):
-    print(f"{bcolors.DEMPH}Running command: {args}{bcolors.ENDC}")
+    verbose_print(f"{bcolors.DEMPH}Running command: {args}{bcolors.ENDC}")
     return check_call(args)
 
 
 def exec_io(*args, **kwargs):
-    print(f"{bcolors.DEMPH}Running io command: {args}{bcolors.ENDC}")
+    verbose_print(f"{bcolors.DEMPH}Running io command: {args}{bcolors.ENDC}")
     proc = subprocess.run(args, capture_output=True, timeout=30, **kwargs)
     try:
         proc.check_returncode()
@@ -79,20 +90,18 @@ def _is_extant_secret(secret_name) -> bool:
     return _is_extant_k8s_item('secret', secret_name)
 
 
-def make_release_name(env: str):
-    return f"{APP_NAME}-{env}"
+def make_release_name(chart_name: str, env: str):
+    return f"{chart_name}-{env}"
 
 
 def write_wiz_config(dirpath: Path, config: dict):
-    wizdir = dirpath / 'wiz'
-    config_yml = wizdir / 'wiz.yml'
+    config_yml = dirpath / 'wiz.yaml'
     with open(config_yml, 'w') as fp:
         yaml.dump(config, fp)
 
 
 def load_wiz_config(dirpath: Path, key: Optional[str] = None):
-    wizdir = dirpath / 'wiz'
-    config_yml = wizdir / 'wiz.yml'
+    config_yml = dirpath / 'wiz.yaml'
 
     try:
         with open(config_yml, 'r') as fp:
@@ -212,19 +221,41 @@ def _is_extant_secret(secret_name) -> bool:
     proc.check_returncode()  # Something else broke
 
 
+def _get_helm_chart_dir(dirpath: Path):
+    dirpath = dirpath / '..'
+    while not (dirpath / 'Chart.yaml').is_file():
+        dirpath = (dirpath / '..')
+    return dirpath.resolve()
+
+def _get_helm_chart_name(dirpath: Path):
+    helm_chart_dir= _get_helm_chart_dir(dirpath)
+    with open(helm_chart_dir / "Chart.yaml") as fp:
+        chart = yaml.safe_load(fp)
+    return chart["name"]
+
 # CLI
 
 @click.group()
-def cli():
-    if not APP_NAME:
-        raise RuntimeError("You must configure deployer APP_NAME")
+@click.option("--verbose", is_flag=True)
+def cli(verbose):
+    GLOBALS["verbose"] = verbose
 
 
 @cli.command("info")
-def sync_cmd():
-
-    print(exec_io('kubectl', 'config', 'current-context').decode('utf8'))
-    print(f"APP_NAME={APP_NAME}")
+@click.argument("dirpath")
+def sync_cmd(dirpath):
+    """
+    Get info about this wiz dir env (and other context)
+    """
+    dirpath = Path(dirpath)
+    env = load_wiz_config(dirpath, "envName")
+    namespace = load_namespace_from_config(dirpath)
+    chart_name = _get_helm_chart_name(dirpath)
+    cluster_name = exec_io('kubectl', 'config', 'current-context').decode('utf8').strip()
+    
+    print(f"cluster: {cluster_name}")
+    print(f"namespace: {namespace}")
+    print(f"release_name: {make_release_name(chart_name, env)}")
 
 
 def _set_docker_registry_secret(namespace, secret_name, email, username, password):
@@ -255,11 +286,12 @@ def nuke_cmd(dirpath):
     dirpath = Path(dirpath)
     env = load_wiz_config(dirpath, "envName")
     namespace = load_namespace_from_config(dirpath)
+    chart_name = _get_helm_chart_name(dirpath)
     exec(
         "helm",
         "uninstall",
         f"--namespace={namespace}",
-        make_release_name(env)
+        make_release_name(chart_name, env)
     )
 
 
@@ -269,11 +301,12 @@ def list_cmd(dirpath):
     dirpath = Path(dirpath)
     env = load_wiz_config(dirpath, "envName")
     namespace = load_namespace_from_config(dirpath)
+    chart_name = _get_helm_chart_name(dirpath)
     exec(
         "helm",
         "history",
         f"--namespace={namespace}",
-        make_release_name(env)
+        make_release_name(chart_name, env)
     )
 
 
@@ -284,11 +317,12 @@ def rollback_cmd(dirpath, revision):
     dirpath = Path(dirpath)
     env = load_wiz_config(dirpath, "envName")
     namespace = load_namespace_from_config(dirpath)
+    chart_name = _get_helm_chart_name(dirpath)
     exec(
         "helm",
         "rollback",
         f"--namespace={namespace}",
-        make_release_name(env),
+        make_release_name(chart_name, env),
         revision
     )
 
@@ -350,7 +384,7 @@ def rm_secret_cmd(dirpath, secret_name):
     namespace = load_namespace_from_config(Path(dirpath))
     exec(
         "kubectl",
-        "remove",
+        "delete",
         "secret",
         f'--namespace={namespace}',
         secret_name
@@ -369,6 +403,9 @@ def envsecret_cli():
 @click.argument("envvar_name")
 @click.argument("envvar_value")
 def set_envvar_cmd(dirpath, envvar_name, envvar_value):
+    """
+    Set the ENV_VAR as a secret
+    """
     dirpath = Path(dirpath)
     env = load_wiz_config(dirpath, "envName")
     namespace = load_namespace_from_config(dirpath)
@@ -389,6 +426,9 @@ def _push_envfile(namespace, env, dotenv_file):
 @click.argument("dirpath")
 @click.argument("dotenv_file")
 def set_envvar_cmd(dirpath, dotenv_file):
+    """
+    Set all the ENV_VAR values in the given files as secrets
+    """
     dirpath = Path(dirpath)
     env = load_wiz_config(dirpath, "envName")
     namespace = load_namespace_from_config(dirpath)
@@ -432,9 +472,12 @@ def _set_file_as_secret(namespace, env, remote_filepath, local_filepath):
 
 @mntsecret_cli.command("set")
 @click.argument("dirpath")
-@click.argument("remote_filepath")
 @click.argument("local_filepath")
-def set_mntsecret_cli(dirpath, remote_filepath, local_filepath):
+@click.argument("remote_filepath")
+def set_mntsecret(dirpath, local_filepath, remote_filepath):
+    """
+    Save local file as a secret
+    """
     dirpath = Path(dirpath)
     env = load_wiz_config(dirpath, "envName")
     namespace = load_namespace_from_config(dirpath)
@@ -446,16 +489,6 @@ def wiz_cli():
     """
     Wizard for pushing secrets / releasing from a env var dir
     """
-
-
-def _iter_filepaths(dirpath: Path):
-
-    for local_path in dirpath.rglob('*'):
-        if local_path.is_dir():
-            continue
-        remote_path = str(local_path).split(str(dirpath))[1]
-        yield local_path, remote_path
-
 
 def _get_file_metas(dirpath: Path) -> Dict[str, List[MntSecretFileMeta]]:
 
@@ -476,9 +509,11 @@ def _get_file_metas(dirpath: Path) -> Dict[str, List[MntSecretFileMeta]]:
 @wiz_cli.command("setup")
 @click.argument("dirpath")
 def wiz_setup(dirpath):
+    """
+    Do initial setup of a wiz dir env
+    """
 
     dirpath = Path(dirpath)
-    wizdir = dirpath / 'wiz'
 
     config = load_wiz_config(dirpath)
 
@@ -527,12 +562,11 @@ def wiz_push(dirpath):
     namespace = load_namespace_from_config(dirpath)
 
     # Handle push .env file
-    wizdir = dirpath / "wiz"
-    dotenv_file = wizdir / '.env'
+    dotenv_file = dirpath / '.env'
     _push_envfile(namespace, env, str(dotenv_file))
 
     # Handle secret files for mnting
-    for remote_dir, file_metas in _get_file_metas(wizdir / 'secretfiles').items():
+    for remote_dir, file_metas in _get_file_metas(dirpath / 'secretfiles').items():
         _set_files_as_secret(namespace, env, remote_dir, file_metas)
 
 
@@ -542,13 +576,13 @@ def _wiz_genvalues(dirpath):
     '''
 
     dirpath = Path(dirpath)
-    wizdir = dirpath / 'wiz'
 
     env = load_wiz_config(dirpath, "envName")
     image_pull_secret_name = load_wiz_config(dirpath, "imagePullSecret")
 
-    dotenv_file = wizdir / '.env'
-    dotenv_vals: Dict[str, str] = dotenv_values(dotenv_file)
+    dotenv_file = dirpath / '.env'
+    with swallow_prints():
+        dotenv_vals: Dict[str, str] = dotenv_values(dotenv_file)
 
     values = {}
     envs = [make_envsecret(env, env_name) for env_name in dotenv_vals.keys()]
@@ -556,7 +590,7 @@ def _wiz_genvalues(dirpath):
     vols = []
     vol_mnts = []
 
-    for remote_dir, file_metas in _get_file_metas(wizdir / 'secretfiles').items():
+    for remote_dir, file_metas in _get_file_metas(dirpath / 'secretfiles').items():
         vol, vol_mnt = make_mntsecret_volume_data(env, remote_dir)
         vols.append(vol)
         vol_mnts.append(vol_mnt)
@@ -596,11 +630,13 @@ def wiz_release(dirpath, image):
     namespace = load_namespace_from_config(dirpath)
     env = load_wiz_config(dirpath, "envName")
 
-    helm_chart_dir = str((dirpath / '..').resolve())
+    helm_chart_dir = _get_helm_chart_dir(dirpath)
+    chart_name = _get_helm_chart_name(dirpath)
+    release_name = make_release_name(chart_name, env)
 
-    print(f'{bcolors.OKCYAN}Deploying image="{image}" to env="{env}"...\n{bcolors.ENDC}')
+    print(f'{bcolors.OKCYAN}Deploying image="{image}" as release="{release_name}"\n{bcolors.ENDC}')
     exec(
-        "helm", "dependency", "update", helm_chart_dir
+        "helm", "dependency", "update", str(helm_chart_dir)
     )
 
     with NamedTemporaryFile('w') as values_file:
@@ -611,8 +647,8 @@ def wiz_release(dirpath, image):
             "upgrade",  # Perform install or upgrade
             "--create-namespace",  # Create namespace if it doesnt exist
             f"--namespace={namespace}",
-            "--install", make_release_name(env),
-            helm_chart_dir,
+            "--install", release_name,
+            str(helm_chart_dir),
             "--set", f"image={image}",
             f"--values={values_file.name}",
         )
