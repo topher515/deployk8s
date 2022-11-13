@@ -33,13 +33,8 @@ class bcolors:
     UNDERLINE = '\033[4m'
 
 
-ENV_NAMES = ["dev", "prod"]
-DEFAULT_ENV = "dev"
-
-
-# TODO: Change this
+# TODO: Change this to derrive from chart??
 APP_NAME = os.getenv('DEPLOYER_APP_PREFIX')
-
 
 GENERIC_SECRET_FIELD_NAME = "value"
 
@@ -333,6 +328,7 @@ def set_secret_cmd(dirpath, secret_name, secret_value):
 def get_secret_cmd(dirpath, no_parse, secret_name):
     namespace = load_namespace_from_config(Path(dirpath))
     extras = [
+        # data.value must match the GENERIC_SECRET_FIELD_NAME!
         "-o=jsonpath='{.data}'"] if no_parse else ["-o=jsonpath='{.data.value}'"]
     output = exec_io(
         "kubectl",
@@ -340,7 +336,6 @@ def get_secret_cmd(dirpath, no_parse, secret_name):
         "secret",
         f'--namespace={namespace}',
         secret_name,
-        # This also comes from GENERIC_SECRET_FIELD_NAME
         *extras)
     if no_parse:
         print(output.decode('utf8'))
