@@ -258,7 +258,7 @@ def sync_cmd(dirpath):
     print(f"release_name: {make_release_name(chart_name, env)}")
 
 
-def _set_docker_registry_secret(namespace, secret_name, email, username, password):
+def _set_docker_registry_secret(namespace, hostname, secret_name, email, username, password):
     exec(
         "kubectl",
         f"--namespace={namespace}",
@@ -266,7 +266,7 @@ def _set_docker_registry_secret(namespace, secret_name, email, username, passwor
         "secret",
         "docker-registry",
         secret_name,
-        "--docker-server=ghcr.io",
+        "--docker-server={hostname}",
         f"--docker-username={username}",
         f"--docker-password={password}",
         f"--docker-email={email}"
@@ -520,6 +520,7 @@ def wiz_setup(dirpath):
     print("Ensuring namespace is setup", file=sys.stderr)
     namespace = load_namespace_from_config(dirpath)
     if not _is_extant_k8s_item("namespace", namespace):
+        print("Creating namespace", file=sys.stderr)
         exec("kubectl", "create", "namespace", namespace)
 
     # Handle env name
@@ -544,11 +545,13 @@ def wiz_setup(dirpath):
     if not _is_extant_secret(image_pull_secret_name):
         print(
             f"Docker Registry Secret '{image_pull_secret_name}' does not exist. Creating it...")
+        print("(For Github password user a Personal Access Token: https://github.com/settings/tokens)")
+        hostname = click.prompt("- Hostname?", default="ghcr.io")
         email = click.prompt("- Email?")
         username = click.prompt("- Username?")
         password = click.prompt("- Password?")
         _set_docker_registry_secret(
-            namespace, image_pull_secret_name, email, username, password)
+            namespace, hostname, image_pull_secret_name, email, username, password)
 
 
 @wiz_cli.command("push")
