@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
 
-from contextlib import contextmanager
 from functools import cache
 import json
 import os
-from pickle import GLOBAL
 import random
 import string
 import subprocess
@@ -48,31 +46,22 @@ VOL_MNT_WHITELIST = '-' + string.ascii_lowercase + string.digits
 
 # UTILS
 
-@contextmanager
-def swallow_prints():
-    with open(os.devnull, "w") as dev_null:
-        original = sys.stdout
-        sys.stdout = dev_null
-        yield
-        sys.stdout = original 
-
 def verbose_print(*args, **kwargs):
     if GLOBALS["verbose"]:
         print(*args, **kwargs)
 
 def exec(*args):
-    verbose_print(f"{bcolors.DEMPH}Running command: {args}{bcolors.ENDC}")
+    verbose_print(f"Running command: {args}")
     return check_call(args)
 
 
 def exec_io(*args, **kwargs):
-    verbose_print(f"{bcolors.DEMPH}Running io command: {args}{bcolors.ENDC}")
+    verbose_print(f"Running io command: {args}")
     proc = subprocess.run(args, capture_output=True, timeout=30, **kwargs)
     try:
         proc.check_returncode()
     except CalledProcessError:
         print(proc.stderr, file=sys.stderr)
-
     return proc.stdout
 
 
@@ -238,6 +227,41 @@ def _get_helm_chart_name(dirpath: Path):
         chart = yaml.safe_load(fp)
     return chart["name"]
 
+def _release_create(image: str):
+    '''
+    Create a helm release from values.yml generated from the wiz env dir
+    (and the helm chart which must be in the parent directory from the wiz env dir)
+    '''
+    dirpath = Path(GLOBALS["dirpath"])
+    values = _wiz_genvalues(dirpath)
+
+    namespace = load_namespace_from_config(dirpath)
+    env = load_wiz_config(dirpath, "envName")
+
+    helm_chart_dir = _get_helm_chart_dir(dirpath)
+    chart_name = _get_helm_chart_name(dirpath)
+    release_name = make_release_name(chart_name, env)
+
+    print(f'{bcolors.OKCYAN}Deploying image="{image}" as release="{release_name}"\n{bcolors.ENDC}')
+    exec(
+        "helm", "dependency", "update", str(helm_chart_dir)
+    )
+
+    with NamedTemporaryFile('w') as values_file:
+        json.dump(values, values_file)
+        values_file.flush()
+        exec(
+            "helm",
+            "upgrade",  # Perform install or upgrade
+            "--create-namespace",  # Create namespace if it doesnt exist
+            f"--namespace={namespace}",
+            "--install", release_name,
+            str(helm_chart_dir),
+            "--set", f"image={image}",
+            f"--values={values_file.name}",
+        )
+
+
 # CLI
 
 @click.group()
@@ -290,7 +314,7 @@ def _set_docker_registry_secret(namespace, hostname, secret_name, email, usernam
     )
 
 
-@cli.group("release")
+@cli.group("releases")
 def release_cli():
     """
     Manipulate k8s releases
@@ -341,7 +365,7 @@ def rollback_cmd(revision):
     )
 
 
-@cli.group("secret")
+@cli.group("secrets")
 def secret_cli():
     """
     Manipulate normal k8s secrets
@@ -401,14 +425,7 @@ def rm_secret_cmd(secret_name):
     )
 
 
-@cli.group("envsecret")
-def envsecret_cli():
-    """
-    Manipulate k8s secrets for use with ENV_VARs
-    """
-
-
-@envsecret_cli.command('set')
+@secret_cli.command('set-as-envar')
 @click.argument("envvar_name")
 @click.argument("envvar_value")
 def set_envvar_cmd(envvar_name, envvar_value):
@@ -431,7 +448,7 @@ def _push_envfile(namespace, env, dotenv_file):
         _set_secret_cmd(namespace, secret_name, envvar_value)
 
 
-@envsecret_cli.command('pushfile')
+@secret_cli.command('set-from-env-file')
 @click.argument("dotenv_file")
 def set_envvar_cmd(dotenv_file):
     """
@@ -441,13 +458,6 @@ def set_envvar_cmd(dotenv_file):
     env = load_wiz_config(dirpath, "envName")
     namespace = load_namespace_from_config(dirpath)
     return _push_envfile(namespace, env, dotenv_file)
-
-
-@cli.group("mntsecret")
-def mntsecret_cli():
-    """
-    Manipulate k8s secrets for use with mounted secret file volumes
-    """
 
 
 def _set_files_as_secret(namespace, env, remote_dir, file_metas: List[MntSecretFileMeta]):
@@ -478,24 +488,18 @@ def _set_file_as_secret(namespace, env, remote_filepath, local_filepath):
         env, dirname, [{"filename": basename, "local_path": local_filepath}])
 
 
-@mntsecret_cli.command("set")
+@secret_cli.command("set")
 @click.argument("local_filepath")
 @click.argument("remote_filepath")
 def set_mntsecret(local_filepath, remote_filepath):
     """
-    Save local file as a secret
+    Save contents of local file as a volume-mountable-secret 
     """
     dirpath = Path(GLOBALS["dirpath"])
     env = load_wiz_config(dirpath, "envName")
     namespace = load_namespace_from_config(dirpath)
     _set_file_as_secret(namespace, env, remote_filepath, local_filepath)
 
-
-@cli.group("wiz")
-def wiz_cli():
-    """
-    Wizard for pushing secrets / releasing from a env var dir
-    """
 
 def _get_file_metas(dirpath: Path) -> Dict[str, List[MntSecretFileMeta]]:
 
@@ -513,10 +517,10 @@ def _get_file_metas(dirpath: Path) -> Dict[str, List[MntSecretFileMeta]]:
     return dict(dir_bucket)
 
 
-@wiz_cli.command("setup")
+@cli.command("setup")
 def wiz_setup():
     """
-    Do initial setup of a wiz dir env
+    Do initial setup for config
     """
 
     dirpath = Path(GLOBALS["dirpath"])
@@ -560,10 +564,10 @@ def wiz_setup():
             namespace, hostname, image_pull_secret_name, email, username, password)
 
 
-@wiz_cli.command("push")
+@cli.command("push")
 def wiz_push():
     '''
-    Push the secrets data derived from the wiz env dir
+    Push the current config
     '''
     dirpath = Path(GLOBALS["dirpath"])
     env = load_wiz_config(dirpath, "envName")
@@ -579,18 +583,13 @@ def wiz_push():
 
 
 def _wiz_genvalues(dirpath: str):
-    '''
-    Print the `values.yaml` file generated from this wiz env dir
-    '''
-
     dirpath = Path(dirpath)
 
     env = load_wiz_config(dirpath, "envName")
     image_pull_secret_name = load_wiz_config(dirpath, "imagePullSecret")
 
     dotenv_file = dirpath / '.env'
-    with swallow_prints():
-        dotenv_vals: Dict[str, str] = dotenv_values(dotenv_file)
+    dotenv_vals: Dict[str, str] = dotenv_values(dotenv_file)
 
     values = {}
     envs = [make_envsecret(env, env_name) for env_name in dotenv_vals.keys()]
@@ -613,56 +612,26 @@ def _wiz_genvalues(dirpath: str):
     return values
 
 
-@wiz_cli.command("genvalues")
+@cli.command("genvalues")
 def wiz_genvalues():
     '''
-    Print the values.yml generated from the wiz env dir
+    Print the values.yml generated from current config
     '''
     values = _wiz_genvalues(GLOBALS["dirpath"])
     yaml.dump(values, sys.stdout)
 
 
-@wiz_cli.command("release")
+@cli.command("deploy")
 @click.argument("image")
-def wiz_release(image):
-    '''
-    Create a helm release from values.yml generated from the wiz env dir
-    (and the helm chart which must be in the parent directory from the wiz env dir)
-    '''
-    dirpath = Path(GLOBALS["dirpath"])
-    values = _wiz_genvalues(dirpath)
-
-    namespace = load_namespace_from_config(dirpath)
-    env = load_wiz_config(dirpath, "envName")
-
-    helm_chart_dir = _get_helm_chart_dir(dirpath)
-    chart_name = _get_helm_chart_name(dirpath)
-    release_name = make_release_name(chart_name, env)
-
-    print(f'{bcolors.OKCYAN}Deploying image="{image}" as release="{release_name}"\n{bcolors.ENDC}')
-    exec(
-        "helm", "dependency", "update", str(helm_chart_dir)
-    )
-
-    with NamedTemporaryFile('w') as values_file:
-        json.dump(values, values_file)
-        values_file.flush()
-        exec(
-            "helm",
-            "upgrade",  # Perform install or upgrade
-            "--create-namespace",  # Create namespace if it doesnt exist
-            f"--namespace={namespace}",
-            "--install", release_name,
-            str(helm_chart_dir),
-            "--set", f"image={image}",
-            f"--values={values_file.name}",
-        )
+def wiz_deploy(image):
+    """
+    Create a new release
+    """
+    _release_create(image)
 
 
-cli.add_command(wiz_cli)
 cli.add_command(release_cli)
 cli.add_command(secret_cli)
-cli.add_command(envsecret_cli)
 
 
 if __name__ == "__main__":
