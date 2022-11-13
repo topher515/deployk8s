@@ -1,0 +1,38 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Release.Name }}-run-on-schedule
+
+spec:
+  schedule: "0 * * * *"  # On the hour every hour
+  jobTemplate:
+    spec:
+      backoffLimit: 4
+      template:
+        spec:
+
+          containers:
+          - name: {{ .Release.Name }}-run-on-schedule
+            image: "{{ .Values.image }}"  
+            imagePullPolicy: Always
+            env:
+              {{- toYaml .Values.env | nindent 14 }}    
+              
+            {{- with .Values.volumeMounts }} 
+            volumeMounts:
+              {{- toYaml .Values.volumeMounts | nindent 14 }}  
+            {{- end }}
+
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+
+          restartPolicy: Never
+
+          {{- with .Values.volumes }}
+          volumes:
+            {{- toYaml .Values.volumes | nindent 12 }}    
+          {{- end }}
+
+          

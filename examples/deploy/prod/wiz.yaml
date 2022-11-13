@@ -1,0 +1,3 @@
+envName: prod
+imagePullSecret: wiz-setup-imagepullsecret-prod-fkb6e
+namespace: testme
