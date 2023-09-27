@@ -1,10 +1,12 @@
 # Help managing k8s + helm
 
-## Setup script
+## Setup this script
 
+- Clone or copy this project
 - Add `<this project>/bin` to your `$PATH`
+- Run the `wizk8s` binary
 
-## Setup your project
+## Setup your project to work with wizk8s
 
 Create a subdir in your helm chart dir like `dev` or `staging-3`. Populate
 it with files/directories like below:
@@ -32,13 +34,17 @@ Setup your deploy (helm) dir like:
       ENV_VAR_2=baz
       ---
 
-Run `deployk8s wiz setup {wiz_dir_env_path}` to setup. Follow prompts
+So now you have several "dir envs" like `<project_name>/helm/staging-3`.
+
+Now `cd` to a dir env.
+
+Run `wizk8s setup` to setup. Follow prompts.
 
 
 ## Deploy
 
-Use the `deployk8s --help` for options
+Use the `wizk8s --help` for options
 
-- Push local secrets, e.g., `deployk8s wiz push helm/dev`
-- To see what helm values with be deployed, e.g., `deployk8s wiz genvalues helm/dev`
-- To release e.g., `deployk8s wiz release helm/dev ghcr.io/topher515/foobar:latest-main`
+- Push local secrets, e.g., `wizk8s --dirpath=helm/dev push`
+- To see what helm values with be deployed, e.g., `wizk8s --dirpath=helm/dev genvalues`
+- To release e.g., `wizk8s --dirpath=helm/dev release ghcr.io/topher515/foobar:latest-main`

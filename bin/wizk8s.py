@@ -97,14 +97,20 @@ def load_wiz_config(dirpath: Path, key: Optional[str] = None):
         with open(config_yml, 'r') as fp:
             config = yaml.safe_load(fp)
     except FileNotFoundError:
+        did_find_config_file = False
         config = {}
+    else:
+        did_find_config_file = True
 
     if not key:
         return config
 
     if config.get(key) is None:
-        raise click.exceptions.UsageError(
-            f"{config_yml} does not have {key} set")
+        if did_find_config_file:
+            usg_msg = f"{config_yml} does not have {key} set"
+        else:
+            usg_msg = f"{config_yml} not found. Did you specify the right directory?"
+        raise click.exceptions.UsageError(usg_msg)
 
     return config[key]
 
